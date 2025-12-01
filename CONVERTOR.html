@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <title>HTML → PDF (Color, Wider + Auto Name)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Arial, sans-serif;background:#092703;margin:0}
+    #controls{display:flex;gap:12px;justify-content:center;align-items:center;padding:16px;background:#092703;position:sticky;top:0;border-bottom:1px solid #092703;z-index:10}
+    input[type="file"],button{padding:10px 14px;background:#6bcf95;color:#092703;border:none;border-radius:6px;cursor:pointer}
+    input[type="file"]:hover,button:hover{background:#6bcf95}
+    #frame{width:90%;height:80vh;border:1px solid #6bcf95;display:block;margin:16px auto;background:#092703}
+    .no-print{display:block}
+    #parsedInfo{max-width:90%;margin:0 auto 8px auto;color:#c8ffd9;font-size:13px;opacity:.9;direction:rtl;text-align:center}
+    #parsedInfo b{color:#6bcf95}
+    @media print{
+      .no-print{display:none !important}
+      *{
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="controls" class="no-print">
+    <input type="file" id="fileInput" accept=".html,.htm" />
+    <button id="btnPrint" disabled>ذخیره PDF</button>
+    <button id="btnExact" disabled>دانلود PDF</button>
+  </div>
+  <div id="parsedInfo" class="no-print">—</div>
+  <iframe id="frame"></iframe>
+
+  <script>
+    const input=document.getElementById('fileInput');
+    const frame=document.getElementById('frame');
+    const btnPrint=document.getElementById('btnPrint');
+    const btnExact=document.getElementById('btnExact');
+    const parsedInfo=document.getElementById('parsedInfo');
+
+    let objectUrl=null;
+    let uploadedFileNameBase='';
+    let currentPdfName='converted';
+
+    const ensureUtf8=h=>{
+      if(/<meta\s+charset=/i.test(h)||/<meta[^>]+charset=/i.test(h))return h;
+      return /<head[^>]*>/i.test(h)?h.replace(/<head[^>]*>/i,m=>m+'\n<meta charset="utf-8">'):h.replace(/<html[^>]*>/i,m=>m+'\n<head><meta charset="utf-8"></head>');
+    };
+
+    const sanitizeFileName = (s)=>{
+      s = (s||'').toString().trim();
+      s = s.replace(/[\\\/:*?"<>|]/g,'-').replace(/\s+/g,' ').replace(/^\.+$/,'');
+      if(s.length>120) s = s.slice(0,120).trim();
+      return s || 'converted';
+    };
+
+    const normalize = (t)=>{
+      return (t||'')
+        .replace(/\u200c/g,'')
+        .replace(/[ـ]+/g,'')
+        .replace(/\s+/g,' ')
+        .trim();
+    };
+
+    const hasLabel = (el, keys)=>{
+      const txt = normalize(el.textContent||'');
+      return keys.some(k => txt.includes(k));
+    };
+
+    const valueNextTo = (labelEl)=>{
+      if(!labelEl) return '';
+      if(labelEl.tagName==='LABEL'){
+        const f = labelEl.getAttribute('for');
+        if(f){
+          const tgt = labelEl.ownerDocument.getElementById(f);
+          if(tgt){
+            return (tgt.value || tgt.textContent || '').trim();
+          }
+        }
+      }
+      let n = labelEl.nextElementSibling;
+      for(let i=0;i<3 && n;i++, n=n.nextElementSibling){
+        const val = (n.value || n.textContent || '').trim();
+        if(val) return val;
+      }
+      const p = labelEl.parentElement;
+      if(p){
+        if(p.tagName==='TR'){
+          const cells=[...p.children];
+          const idx = cells.indexOf(labelEl);
+          if(idx>-1 && cells[idx+1]){
+            return (cells[idx+1].textContent||'').trim();
+          }
+        }
+        const candidates = [...p.querySelectorAll('input,textarea,select,.value,[data-value]')];
+        for(const c of candidates){
+          const val = (c.value || c.getAttribute?.('data-value') || c.textContent || '').trim();
+          if(val) return val;
+        }
+      }
+      return '';
+    };
+
+    const extractSupervisorAndName = (doc)=>{
+      const K_SUP = ['سرپرست','نام سرپرست','سرپرست مستقیم','سرپرست شهر'];
+      const K_NAME = ['نام و نام خانوادگی','نام‌ونام خانوادگی','نام و نام‌خانوادگی','نام کامل','نام خانوادگی و نام'];
+
+      let supervisor='', fullName='';
+
+      const metaSup = doc.querySelector('meta[name="supervisor"]');
+      if(metaSup?.content) supervisor = metaSup.content;
+      const metaName = doc.querySelector('meta[name="full-name"], meta[name="fullname"], meta[name="name-full"]');
+      if(metaName?.content) fullName = metaName.content;
+
+      if(!supervisor){
+        const elSup = doc.getElementById('supervisor') || doc.querySelector('[data-supervisor],[data-role="supervisor"]');
+        if(elSup) supervisor = elSup.getAttribute('data-supervisor') || elSup.textContent || elSup.value || '';
+      }
+      if(!fullName){
+        const elName = doc.getElementById('full-name') || doc.querySelector('[data-full-name],[data-fullname]');
+        if(elName) fullName = elName.getAttribute('data-full-name') || elName.getAttribute('data-fullname') || elName.textContent || elName.value || '';
+      }
+
+      const tables = [...doc.querySelectorAll('table')];
+      for(const t of tables){
+        if(supervisor && fullName) break;
+        const rows=[...t.querySelectorAll('tr')];
+        for(const r of rows){
+          const cells=[...r.querySelectorAll('th,td')];
+          for(let i=0;i<cells.length;i++){
+            const cell=cells[i];
+            const txt = normalize(cell.textContent||'');
+            if(!supervisor && hasLabel(cell,K_SUP)){
+              const nxt=cells[i+1];
+              if(nxt) supervisor=(nxt.textContent||'').trim();
+            }
+            if(!fullName && hasLabel(cell,K_NAME)){
+              const nxt=cells[i+1];
+              if(nxt) fullName=(nxt.textContent||'').trim();
+            }
+          }
+        }
+      }
+
+      if(!supervisor || !fullName){
+        const labels = [...doc.querySelectorAll('label, dt, .label, .lbl, .field-label, th, strong, b, span')];
+        for(const lb of labels){
+          if(!supervisor && hasLabel(lb,K_SUP)){
+            supervisor = valueNextTo(lb);
+          }
+          if(!fullName && hasLabel(lb,K_NAME)){
+            fullName = valueNextTo(lb);
+          }
+          if(supervisor && fullName) break;
+        }
+      }
+
+      supervisor = normalize(supervisor);
+      fullName   = normalize(fullName);
+      return { supervisor, fullName };
+    };
+
+    const buildPdfName = ({supervisor, fullName})=>{
+      let parts = [];
+      if(supervisor) parts.push(`سرپرست_${supervisor}`);
+      if(fullName)   parts.push(fullName);
+      if(parts.length===0) parts = [uploadedFileNameBase || 'converted'];
+      return sanitizeFileName(parts.join('_'));
+    };
+
+    input.addEventListener('change',()=>{
+      const f=input.files&&input.files[0]; if(!f)return;
+      uploadedFileNameBase = f.name.replace(/\.[^.]+$/,'').trim();
+
+      if(objectUrl) URL.revokeObjectURL(objectUrl);
+      const r=new FileReader();
+      r.onload=e=>{
+        let t=String(e.target.result||''); t=ensureUtf8(t);
+        const b=new Blob([t],{type:'text/html;charset=utf-8'});
+        objectUrl=URL.createObjectURL(b);
+        btnPrint.disabled=true; btnExact.disabled=true;
+        frame.removeAttribute('sandbox');
+        frame.src=objectUrl;
+      };
+      r.readAsText(f,'utf-8');
+    });
+
+    frame.addEventListener('load',async()=>{
+      const d=frame.contentDocument; if(!d)return;
+      if(d.fonts&&d.fonts.ready) await d.fonts.ready;
+
+      const {supervisor, fullName} = extractSupervisorAndName(d);
+      currentPdfName = buildPdfName({supervisor, fullName});
+
+      parsedInfo.innerHTML = `نام فایل PDF: <b>${currentPdfName}.pdf</b>
+        &nbsp; | &nbsp; سرپرست: <b>${supervisor || '—'}</b>
+        &nbsp; | &nbsp; نام و نام خانوادگی: <b>${fullName || '—'}</b>`;
+
+      btnPrint.disabled=false; btnExact.disabled=false;
+    });
+
+    btnPrint.addEventListener('click',()=>{
+      const w=window.open(frame.src,'_blank');
+      if(!w){ alert('اجازهٔ پاپ‌آپ را فعال کن.'); return; }
+      const go=()=>{ try{ w.focus(); w.print(); }catch{} };
+      if(w.document.readyState==='complete') go(); else w.addEventListener('load',go,{once:true});
+    });
+
+    btnExact.addEventListener('click',async()=>{
+      const d=frame.contentDocument; if(!d)return;
+      if(d.fonts&&d.fonts.ready) await d.fonts.ready;
+
+      const style=d.createElement('style');
+      style.textContent='*,*::before,*::after{box-shadow:none !important}';
+      d.head.appendChild(style);
+
+      const el=d.body;
+      const w=el.scrollWidth, h=el.scrollHeight;
+      const scale=Math.max(2, Math.ceil(window.devicePixelRatio||1));
+      const canvas=await html2canvas(el,{
+      useCORS:true,
+      allowTaint:false,
+     backgroundColor:'#ffffff', // پس‌زمینه سفید
+      scale,
+     width:w,
+     height:h,
+     windowWidth:d.documentElement.scrollWidth,
+     windowHeight:d.documentElement.scrollHeight
+});
+
+
+      style.remove();
+
+      const { jsPDF }=window.jspdf;
+      const scaleWidth=1.0;  
+      const pdfW=w*scaleWidth, pdfH=h*scaleWidth;
+      const pdf=new jsPDF({unit:'px',format:[pdfW,pdfH],orientation:w>h?'landscape':'portrait'});
+      const img = canvas.toDataURL('image/jpeg', 0.7); // کیفیت 70%
+      pdf.addImage(img, 'JPEG', 0, 0, pdfW, pdfH);
+      pdf.save(`${currentPdfName}.pdf`);
+    });
+
+    window.addEventListener('beforeunload',()=>{ if(objectUrl)URL.revokeObjectURL(objectUrl); });
+  </script>
+</body>
+</html>
