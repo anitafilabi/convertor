@@ -220,26 +220,53 @@
       const el=d.body;
       const w=el.scrollWidth, h=el.scrollHeight;
       const scale=Math.max(2, Math.ceil(window.devicePixelRatio||1));
-      const canvas=await html2canvas(el,{
-      useCORS:true,
-      allowTaint:false,
-     backgroundColor:'#ffffff', // پس‌زمینه سفید
-      scale,
-     width:w,
-     height:h,
-     windowWidth:d.documentElement.scrollWidth,
-     windowHeight:d.documentElement.scrollHeight
-});
+      const MAX_CANVAS_DIM=16384; // محدودیت امن برای ابعاد بوم html2canvas
 
+      const baseOptions={
+        useCORS:true,
+        allowTaint:false,
+        backgroundColor:'#ffffff',
+        scale,
+        width:w,
+        x:0,
+        windowWidth:d.documentElement.scrollWidth
+      };
+
+      const slices=[];
+      const sliceHeights=[];
+
+      if(Math.max(w,h)*scale<=MAX_CANVAS_DIM){
+        slices.push(await html2canvas(el,{...baseOptions,height:h,windowHeight:d.documentElement.scrollHeight,scrollY:0,y:0}));
+        sliceHeights.push(h);
+      }else{
+        const safeHeight=Math.floor(MAX_CANVAS_DIM/scale);
+        let rendered=0;
+        while(rendered<h){
+          const currentHeight=Math.min(safeHeight,h-rendered);
+          slices.push(await html2canvas(el,{...baseOptions,height:currentHeight,windowHeight:currentHeight,scrollY:-rendered,y:rendered}));
+          sliceHeights.push(currentHeight);
+          rendered+=currentHeight;
+        }
+      }
 
       style.remove();
 
       const { jsPDF }=window.jspdf;
-      const scaleWidth=1.0;  
-      const pdfW=w*scaleWidth, pdfH=h*scaleWidth;
-      const pdf=new jsPDF({unit:'px',format:[pdfW,pdfH],orientation:w>h?'landscape':'portrait'});
-      const img = canvas.toDataURL('image/jpeg', 0.7); // کیفیت 70%
-      pdf.addImage(img, 'JPEG', 0, 0, pdfW, pdfH);
+      const MAX_DIM=14400; // محدودیت ابعاد PDF در jsPDF
+      const pdfW=Math.min(w,MAX_DIM);
+      const imgScale=pdfW/w;
+
+      const firstPdfHeight=Math.min(MAX_DIM,sliceHeights[0]*imgScale);
+      const pdf=new jsPDF({unit:'px',format:[pdfW,firstPdfHeight],orientation:w>h?'landscape':'portrait'});
+
+      slices.forEach((canvas,idx)=>{
+        const sliceHtmlHeight=sliceHeights[idx];
+        const pdfH=Math.min(MAX_DIM,sliceHtmlHeight*imgScale);
+        if(idx>0) pdf.addPage([pdfW,pdfH]);
+        const img=canvas.toDataURL('image/jpeg',0.92);
+        pdf.addImage(img,'JPEG',0,0,pdfW,pdfH);
+      });
+
       pdf.save(`${currentPdfName}.pdf`);
     });
 
